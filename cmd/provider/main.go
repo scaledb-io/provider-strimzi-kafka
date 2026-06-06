@@ -1,4 +1,4 @@
-// package main implements the provider-kafka provider.
+// package main implements the provider-strimzi-kafka provider.
 package main
 
 import (
@@ -8,7 +8,7 @@ import (
 
 	"github.com/openeverest/openeverest/v2/provider-runtime/reconciler"
 
-	"github.com/scaledb-io/provider-kafka/internal/provider"
+	"github.com/scaledb-io/provider-strimzi-kafka/internal/provider"
 )
 
 // main is the entry point for the provider.

@@ -7,7 +7,7 @@ $(LOCALBIN):
 CONTAINER_TOOL ?= docker
 
 # Image URL to use for building/pushing image targets
-IMG ?= ghcr.io/scaledb-io/provider-kafka-dev:latest
+IMG ?= ghcr.io/scaledb-io/provider-strimzi-kafka-dev:latest
 
 # controller-gen version
 CONTROLLER_TOOLS_VERSION ?= v0.18.0
@@ -22,7 +22,7 @@ GOLANGCI_LINT_VERSION ?= v1.63.4
 GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)
 
 # Helm chart directory
-CHART_DIR ?= charts/provider-kafka
+CHART_DIR ?= charts/provider-strimzi-kafka
 
 .PHONY: help
 help: ## Display this help.
@@ -88,19 +88,19 @@ docker-push: ## Push docker image.
 
 .PHONY: helm-install
 helm-install: ## Install the provider using Helm.
-	helm install provider-kafka $(CHART_DIR) --create-namespace
+	helm install provider-strimzi-kafka $(CHART_DIR) --create-namespace
 
 .PHONY: helm-upgrade
 helm-upgrade: ## Upgrade the provider using Helm.
-	helm upgrade provider-kafka $(CHART_DIR)
+	helm upgrade provider-strimzi-kafka $(CHART_DIR)
 
 .PHONY: helm-uninstall
 helm-uninstall: ## Uninstall the provider using Helm.
-	helm uninstall provider-kafka
+	helm uninstall provider-strimzi-kafka
 
 .PHONY: helm-template
 helm-template: ## Render Helm chart templates locally (dry-run).
-	helm template provider-kafka $(CHART_DIR)
+	helm template provider-strimzi-kafka $(CHART_DIR)
 
 ##@ Testing
 

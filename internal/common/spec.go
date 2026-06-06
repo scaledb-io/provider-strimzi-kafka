@@ -4,7 +4,7 @@ package common
 const (
 	// ProviderName is the canonical name of this provider.
 	// Must match the Provider CR name registered in OpenEverest.
-	ProviderName = "provider-kafka"
+	ProviderName = "provider-strimzi-kafka"
 
 	// ComponentEngine is the logical name of the Kafka engine component.
 	ComponentEngine = "engine"

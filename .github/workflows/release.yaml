@@ -13,8 +13,8 @@ permissions:
 env:
   REGISTRY: ghcr.io
   IMAGE_PREFIX: ghcr.io/scaledb-io
-  PROVIDER_IMAGE_NAME: provider-kafka
-  PROVIDER_DEV_IMAGE_NAME: provider-kafka-dev
+  PROVIDER_IMAGE_NAME: provider-strimzi-kafka
+  PROVIDER_DEV_IMAGE_NAME: provider-strimzi-kafka-dev
 
 jobs:
   build:
@@ -166,13 +166,13 @@ jobs:
       - name: Prepare RC chart
         if: env.IS_RC == 'true'
         run: |
-          cd charts/provider-kafka
+          cd charts/provider-strimzi-kafka
           VERSION=${{ env.VERSION }} make release-dev
 
       - name: Prepare release chart
         if: env.IS_RC == 'false'
         run: |
-          cd charts/provider-kafka
+          cd charts/provider-strimzi-kafka
           VERSION=${{ env.VERSION }} make release
 
       - name: Release chart

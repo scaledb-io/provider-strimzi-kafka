@@ -2,15 +2,15 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "provider-kafka.fullname" . }}
+  name: {{ include "provider-strimzi-kafka.fullname" . }}
   labels:
-    {{- include "provider-kafka.labels" . | nindent 4 }}
+    {{- include "provider-strimzi-kafka.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ include "provider-kafka.fullname" . }}
+  name: {{ include "provider-strimzi-kafka.fullname" . }}
 subjects:
   - kind: ServiceAccount
-    name: {{ include "provider-kafka.serviceAccountName" . }}
+    name: {{ include "provider-strimzi-kafka.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 {{- end }}

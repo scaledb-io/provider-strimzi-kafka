@@ -1,11 +1,11 @@
-# Default values for provider-kafka.
+# Default values for provider-strimzi-kafka.
 
 # -- Number of replicas for the provider deployment
 replicaCount: 1
 
 image:
   # -- Container image repository
-  repository: ghcr.io/openeverest/provider-kafka-dev
+  repository: ghcr.io/openeverest/provider-strimzi-kafka-dev
   # -- Image pull policy
   pullPolicy: IfNotPresent
   # -- Overrides the image tag whose default is the chart appVersion
@@ -99,7 +99,7 @@ affinity: {}
 
 provider:
   # -- The name to register for the Provider custom resource
-  name: provider-kafka
+  name: provider-strimzi-kafka
 
 # -- Additional environment variables to set on the provider container
 extraEnv: []

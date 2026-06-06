@@ -5,12 +5,12 @@ spec:
     kafka:
       versions:
         - default: true
-          image: quay.io/strimzi/kafka:0.44.0-kafka-3.9.0
-          version: 3.9.0
-        - image: quay.io/strimzi/kafka:0.44.0-kafka-3.8.1
+          image: quay.io/strimzi/kafka:0.47.0-kafka-4.0.0
+          version: 4.0.0
+        - image: quay.io/strimzi/kafka:0.47.0-kafka-3.9.1
+          version: 3.9.1
+        - image: quay.io/strimzi/kafka:0.45.0-kafka-3.8.1
           version: 3.8.1
-        - image: quay.io/strimzi/kafka:0.44.0-kafka-3.7.2
-          version: 3.7.2
   components:
     engine:
       type: kafka
@@ -222,12 +222,12 @@ spec:
         - advanced
   versions:
     - components:
-        engine: 3.9.0
+        engine: 4.0.0
       default: true
+      name: "4.0"
+    - components:
+        engine: 3.9.1
       name: "3.9"
     - components:
         engine: 3.8.1
       name: "3.8"
-    - components:
-        engine: 3.7.2
-      name: "3.7"

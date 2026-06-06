@@ -1,4 +1,4 @@
-# provider-kafka
+# provider-strimzi-kafka
 
 An [OpenEverest](https://github.com/openeverest) provider for Apache Kafka.
 
@@ -70,7 +70,7 @@ Suitable for production workloads requiring high availability.
 ```
 OpenEverest Instance CR
       ↓
-provider-kafka (this provider)
+provider-strimzi-kafka (this provider)
       ↓  creates
 Strimzi Kafka CR (KRaft mode — no ZooKeeper)
       ↓  managed by

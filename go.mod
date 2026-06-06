@@ -1,4 +1,4 @@
-module github.com/scaledb-io/provider-kafka
+module github.com/scaledb-io/provider-strimzi-kafka
 
 go 1.26.3
 
