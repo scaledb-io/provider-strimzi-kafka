@@ -117,8 +117,10 @@ leaderElection:
   # -- Enable leader election (recommended for HA deployments)
   enabled: true
 
-# TODO: Add values for your operator subchart dependency, e.g.:
-# my-operator:
-#   replicaCount: 1
-#   rbac:
-#     create: true
+# The Strimzi Kafka operator is bundled as a subchart (alias "operator", see
+# Chart.yaml dependencies) and runs with its upstream defaults. The operator
+# installs/updates its own CRDs. To override operator settings, add an
+# "operator:" block here keyed to the strimzi-kafka-operator chart values, e.g.:
+# operator:
+#   watchAnyNamespace: true
+#   replicas: 1
