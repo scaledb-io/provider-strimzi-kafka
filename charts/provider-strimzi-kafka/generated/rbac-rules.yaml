@@ -32,6 +32,31 @@
     - list
     - watch
 - apiGroups:
+    - core.openeverest.io
+  resources:
+    - instances
+    - providers
+  verbs:
+    - get
+    - list
+    - patch
+    - update
+    - watch
+- apiGroups:
+    - core.openeverest.io
+  resources:
+    - instances/finalizers
+  verbs:
+    - update
+- apiGroups:
+    - core.openeverest.io
+  resources:
+    - instances/status
+  verbs:
+    - get
+    - patch
+    - update
+- apiGroups:
     - kafka.strimzi.io
   resources:
     - kafkanodepools
