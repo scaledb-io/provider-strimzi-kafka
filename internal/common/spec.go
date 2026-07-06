@@ -40,4 +40,23 @@ const (
 
 	// DefaultMetadataVersion is used when the version-specific value is not resolved.
 	DefaultMetadataVersion = KafkaMetadataVersion4_2
+
+	// Strimzi custom resource GroupVersionKind coordinates.
+	//
+	// Strimzi 1.0.0 promoted the Kafka and KafkaNodePool APIs to the stable
+	// v1 version (v1beta2 is no longer served). We address these CRs via
+	// unstructured objects so the provider does not need a typed Go client for
+	// a specific Strimzi API version.
+	StrimziGroup = "kafka.strimzi.io"
+	StrimziVersion = "v1"
+	KafkaKind = "Kafka"
+	KafkaNodePoolKind = "KafkaNodePool"
+
+	// NodePoolName is the KafkaNodePool name created for each instance. In KRaft
+	// mode a single dual-role (controller+broker) pool backs the cluster.
+	NodePoolName = "nodes"
+
+	// ClusterLabel is the Strimzi label that binds a KafkaNodePool to its Kafka
+	// cluster. Its value must equal the Kafka CR name.
+	ClusterLabel = "strimzi.io/cluster"
 )
