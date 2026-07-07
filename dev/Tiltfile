@@ -21,7 +21,9 @@ def str2bool(v):
 # ===========================
 # The OpenEverest core chart installs CRDs and multiple workloads; 30s (the
 # default) is not enough if container images are not cached on cold start.
-update_settings(k8s_upsert_timeout_secs=120)
+# The cold core `helm upgrade --install` (image pulls + CRDs) routinely runs
+# past 2m even when it ultimately succeeds, so give it generous headroom.
+update_settings(k8s_upsert_timeout_secs=300)
 
 # ===========================
 # Configuration (.env)
@@ -36,8 +38,13 @@ if os.path.exists(local_env_file):
 # the core from source in a separate Tilt instance.
 install_openeverest = str2bool(os.getenv('INSTALL_OPENEVEREST', 'true'))
 
-# Released OpenEverest core version to install. Empty means latest.
-openeverest_version = os.getenv('OPENEVEREST_VERSION', '')
+# Released OpenEverest core version to install.
+# NOTE: while OpenEverest v2 is in pre-release, the Helm repo only publishes
+# pre-release tags (e.g. 2.0.0-dev.1) and Helm's "latest" resolution skips
+# pre-releases — so an empty value pulls the v1.x stable lineage, which has no
+# core.openeverest.io CRDs and the provider can't reconcile. Default to the
+# v2-dev tag until v2.0.0 is GA. Override via dev/.env.
+openeverest_version = os.getenv('OPENEVEREST_VERSION', '2.0.0-dev.1')
 
 # Helm repository that hosts the OpenEverest core chart.
 openeverest_helm_repo = os.getenv(

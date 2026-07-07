@@ -13,8 +13,12 @@ sources:
   - https://github.com/openeverest/provider-strimzi-kafka
 maintainers:
   - name: OpenEverest Contributors
-# TODO: If your provider depends on an operator Helm chart, add it here.
-# dependencies:
-#   - name: my-operator
-#     version: "1.0.0"
-#     repository: https://example.com/helm-charts/
+# The provider owns the operator lifecycle: the Strimzi Kafka operator ships as a
+# bundled subchart (alias "operator") so the provider installs out of the box and
+# customers do not have to install the operator separately. Resolved at install
+# time via `helm dependency update` (Tilt/CI run this automatically).
+dependencies:
+  - name: strimzi-kafka-operator
+    alias: operator
+    version: "1.0.0"
+    repository: https://strimzi.io/charts/

@@ -12,19 +12,32 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package provider implements the OpenEverest provider for Apache Kafka via the
+// Strimzi operator (https://strimzi.io).
+//
+// Implementation note:
+// Strimzi 1.0.0 serves the Kafka and KafkaNodePool APIs at the stable v1
+// version (v1beta2 was removed) and mandates the KRaft + NodePool model:
+//   - The Kafka CR carries cluster-wide config (version, metadataVersion,
+//     listeners, broker config) but NO longer holds replicas or storage.
+//   - Broker/controller replicas, roles, storage and resources live on a
+//     KafkaNodePool CR bound to the Kafka cluster via the
+//     "strimzi.io/cluster" label.
+//
+// We build both CRs as unstructured Kubernetes objects (plain
+// map[string]interface{}) so the provider has zero dependency on a typed Go
+// client pinned to a specific Strimzi API version. This mirrors the sibling
+// provider-redpanda implementation.
 package provider
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
-	kafkav1beta2 "github.com/RedHatInsights/strimzi-client-go/apis/kafka.strimzi.io/v1beta2"
 	"k8s.io/apimachinery/pkg/api/resource"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/openeverest/openeverest/v2/api/core/v1alpha1"
@@ -32,6 +45,20 @@ import (
 
 	"github.com/scaledb-io/provider-strimzi-kafka/internal/common"
 )
+
+// kafkaGVK is the GroupVersionKind for the Strimzi Kafka cluster CR.
+var kafkaGVK = schema.GroupVersionKind{
+	Group:   common.StrimziGroup,
+	Version: common.StrimziVersion,
+	Kind:    common.KafkaKind,
+}
+
+// nodePoolGVK is the GroupVersionKind for the Strimzi KafkaNodePool CR.
+var nodePoolGVK = schema.GroupVersionKind{
+	Group:   common.StrimziGroup,
+	Version: common.StrimziVersion,
+	Kind:    common.KafkaNodePoolKind,
+}
 
 // Compile-time check.
 var _ controller.ProviderInterface = (*Provider)(nil)
@@ -46,10 +73,10 @@ func New() *Provider {
 	return &Provider{
 		BaseProvider: controller.BaseProvider{
 			ProviderName: common.ProviderName,
-			SchemeFuncs: []func(*runtime.Scheme) error{
-				kafkav1beta2.AddToScheme,
-			},
-			// NOTE: We intentionally do NOT watch Kafka CRs here.
+			// No SchemeFuncs needed — we use unstructured objects to avoid
+			// depending on a typed Strimzi client for a specific API version.
+			SchemeFuncs: nil,
+			// NOTE: We intentionally do NOT watch Kafka/KafkaNodePool CRs here.
 			// Watching them causes a tight feedback loop: operator updates
 			// (finalizers, status) re-trigger Apply, which updates the object,
 			// which triggers the Strimzi operator again.
@@ -93,27 +120,42 @@ func (p *Provider) Validate(c *controller.Context) error {
 	return nil
 }
 
-// Sync creates or waits on the Kafka CR for the selected topology.
+// Sync creates or waits on the Kafka + KafkaNodePool CRs for the selected topology.
 //
-// Create-only semantics: once created, Strimzi owns the Kafka CR and we must
-// not overwrite its changes on every reconcile. WaitError is returned while
+// Create-only semantics: once created, Strimzi owns the CRs and we must not
+// overwrite its changes on every reconcile. WaitError is returned while
 // provisioning is in progress so the runtime requeues after 15s.
+//
+// Ordering: the KafkaNodePool is applied first, then the Kafka CR. Strimzi
+// resolves the pool→cluster binding by label, so either order is accepted, but
+// creating the pool first avoids a transient "no node pools" warning on the
+// Kafka resource.
 func (p *Provider) Sync(c *controller.Context) error {
 	l := log.FromContext(c.Context())
 	topology := c.Instance().GetTopologyType()
 	l.Info("Syncing Kafka instance", "name", c.Name(), "topology", topology)
 
-	existing := &kafkav1beta2.Kafka{}
+	existing := newKafkaObj(c.Name(), c.Namespace())
 	if err := c.Get(existing, c.Name()); err != nil {
 		replicas := brokerReplicas(c)
-		kafka, buildErr := buildKafka(c, replicas)
+
+		pool, buildErr := buildNodePool(c, replicas)
+		if buildErr != nil {
+			return fmt.Errorf("build KafkaNodePool CR: %w", buildErr)
+		}
+		if applyErr := c.Apply(pool); applyErr != nil {
+			return fmt.Errorf("create KafkaNodePool CR: %w", applyErr)
+		}
+
+		kafka, buildErr := buildKafka(c)
 		if buildErr != nil {
 			return fmt.Errorf("build Kafka CR: %w", buildErr)
 		}
 		if applyErr := c.Apply(kafka); applyErr != nil {
 			return fmt.Errorf("create Kafka CR: %w", applyErr)
 		}
-		l.Info("Kafka CR created", "name", c.Name(), "brokers", replicas)
+
+		l.Info("Kafka CR and KafkaNodePool created", "name", c.Name(), "brokers", replicas)
 		return controller.WaitForDuration("waiting for Strimzi operator to provision Kafka cluster", 15*time.Second)
 	}
 
@@ -121,20 +163,16 @@ func (p *Provider) Sync(c *controller.Context) error {
 }
 
 // waitForKafka checks the Kafka CR status and returns a WaitError if not yet ready.
-func waitForKafka(c *controller.Context, kafka *kafkav1beta2.Kafka) error {
+func waitForKafka(c *controller.Context, kafka *unstructured.Unstructured) error {
 	l := log.FromContext(c.Context())
-
-	if kafka.Status == nil {
-		return controller.WaitForDuration("waiting for Strimzi operator to initialize Kafka", 15*time.Second)
-	}
 
 	ready, msg := kafkaReadyCondition(kafka)
 	if ready {
-		l.Info("Kafka cluster is Ready", "name", kafka.Name)
+		l.Info("Kafka cluster is Ready", "name", kafka.GetName())
 		return nil
 	}
 
-	l.Info("Kafka cluster still provisioning", "name", kafka.Name, "message", msg)
+	l.Info("Kafka cluster still provisioning", "name", kafka.GetName(), "message", msg)
 	return controller.WaitForDuration(
 		fmt.Sprintf("waiting for Strimzi operator to complete Kafka provisioning: %s", msg),
 		15*time.Second,
@@ -143,12 +181,9 @@ func waitForKafka(c *controller.Context, kafka *kafkav1beta2.Kafka) error {
 
 // Status reports the current status of the Kafka instance.
 func (p *Provider) Status(c *controller.Context) (controller.Status, error) {
-	kafka := &kafkav1beta2.Kafka{}
+	kafka := newKafkaObj(c.Name(), c.Namespace())
 	if err := c.Get(kafka, c.Name()); err != nil {
 		return controller.Provisioning("Waiting for Kafka CR"), nil
-	}
-	if kafka.Status == nil {
-		return controller.Provisioning("Waiting for operator to initialize"), nil
 	}
 
 	ready, msg := kafkaReadyCondition(kafka)
@@ -167,14 +202,19 @@ func (p *Provider) Status(c *controller.Context) (controller.Status, error) {
 	return controller.Provisioning(fmt.Sprintf("Cluster is being created: %s", msg)), nil
 }
 
-// Cleanup removes the Kafka CR when the Instance is deleted.
+// Cleanup removes the Kafka and KafkaNodePool CRs when the Instance is deleted.
 func (p *Provider) Cleanup(c *controller.Context) error {
 	l := log.FromContext(c.Context())
 	l.Info("Cleaning up Kafka instance", "name", c.Name())
 
-	kafka := &kafkav1beta2.Kafka{ObjectMeta: c.ObjectMeta(c.Name())}
+	kafka := newKafkaObj(c.Name(), c.Namespace())
 	if err := c.Delete(kafka); err != nil {
 		return fmt.Errorf("delete Kafka CR: %w", err)
+	}
+
+	pool := newNodePoolObj(c.Name(), c.Namespace())
+	if err := c.Delete(pool); err != nil {
+		return fmt.Errorf("delete KafkaNodePool CR: %w", err)
 	}
 
 	l.Info("Kafka instance cleaned up", "name", c.Name())
@@ -185,8 +225,29 @@ func (p *Provider) Cleanup(c *controller.Context) error {
 // Builders
 // =============================================================================
 
-// buildKafka constructs a Strimzi Kafka CR configured for KRaft mode.
-func buildKafka(c *controller.Context, replicas int) (*kafkav1beta2.Kafka, error) {
+// buildKafka constructs an unstructured Strimzi Kafka CR (KRaft mode).
+//
+// In Strimzi 1.0.0 the Kafka CR holds cluster-wide configuration only; broker
+// replicas and storage live on the KafkaNodePool (see buildNodePool). The
+// KRaft and node-pool feature annotations are required so the operator treats
+// this as a KRaft cluster backed by node pools.
+//
+// Resulting CR (kafka.strimzi.io/v1):
+//
+//	metadata:
+//	  annotations:
+//	    strimzi.io/kraft: enabled
+//	    strimzi.io/node-pools: enabled
+//	spec:
+//	  kafka:
+//	    version: <x.y.z>
+//	    metadataVersion: <x.y-IVn>
+//	    listeners: [plain:9092, tls:9093]
+//	    config: {replication factors / min ISR}
+//	  entityOperator:
+//	    topicOperator: {}
+//	    userOperator: {}
+func buildKafka(c *controller.Context) (*unstructured.Unstructured, error) {
 	engine := c.Instance().Spec.Components[common.ComponentEngine]
 	image, err := resolveImage(c, engine)
 	if err != nil {
@@ -194,72 +255,94 @@ func buildKafka(c *controller.Context, replicas int) (*kafkav1beta2.Kafka, error
 	}
 	kafkaVersion := extractKafkaVersion(image)
 	metadataVersion := resolveMetadataVersion(image)
-	cpu, memory := resolveResources(engine)
-	storageSize, storageClass := resolveStorage(engine)
-	kafkaConfig := buildKafkaConfig(replicas)
+	replicas := brokerReplicas(c)
 
-	replicaCount := int32(replicas) //nolint:gosec
-	volID := int32(0)
-	deleteClaim := false
-	storageSizeStr := storageSize.String()
-
-	// Plain (non-TLS) and TLS internal listeners.
-	listenerType := kafkav1beta2.KafkaSpecKafkaListenersElemType("internal")
-	listeners := []kafkav1beta2.KafkaSpecKafkaListenersElem{
-		{Name: "plain", Port: 9092, Type: listenerType, Tls: false},
-		{Name: "tls", Port: 9093, Type: listenerType, Tls: true},
+	listeners := []interface{}{
+		map[string]interface{}{"name": "plain", "port": int64(9092), "type": "internal", "tls": false},
+		map[string]interface{}{"name": "tls", "port": int64(9093), "type": "internal", "tls": true},
 	}
 
-	// JBOD storage with a single persistent volume.
-	storageVolume := kafkav1beta2.KafkaSpecKafkaStorageVolumesElem{
-		Id:          &volID,
-		Type:        kafkav1beta2.KafkaSpecKafkaStorageVolumesElemType("persistent-claim"),
-		Size:        &storageSizeStr,
-		DeleteClaim: &deleteClaim,
-		Class:       storageClass,
-	}
-	storage := &kafkav1beta2.KafkaSpecKafkaStorage{
-		Type:    kafkav1beta2.KafkaSpecKafkaStorageType("jbod"),
-		Volumes: []kafkav1beta2.KafkaSpecKafkaStorageVolumesElem{storageVolume},
-	}
-
-	// Resources as apiextensions JSON (Strimzi uses freeform resource maps).
-	resources := buildResourcesJSON(cpu, memory)
-
-	kafka := &kafkav1beta2.Kafka{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      c.Name(),
-			Namespace: c.Namespace(),
-			Annotations: map[string]string{
-				// Enable KRaft mode — no ZooKeeper required.
-				"strimzi.io/kraft":      "enabled",
-				"strimzi.io/node-pools": "enabled",
-			},
+	kafka := newKafkaObj(c.Name(), c.Namespace())
+	kafka.SetAnnotations(map[string]string{
+		// Enable KRaft mode (no ZooKeeper) and the node-pool model.
+		"strimzi.io/kraft":      "enabled",
+		"strimzi.io/node-pools": "enabled",
+	})
+	kafka.Object["spec"] = map[string]interface{}{
+		"kafka": map[string]interface{}{
+			"version":         kafkaVersion,
+			"metadataVersion": metadataVersion,
+			"listeners":       listeners,
+			"config":          buildKafkaConfig(replicas),
 		},
-		Spec: &kafkav1beta2.KafkaSpec{
-			Kafka: kafkav1beta2.KafkaSpecKafka{
-				Version:         &kafkaVersion,
-				MetadataVersion: &metadataVersion,
-				Image:           &image,
-				Replicas:        &replicaCount,
-				Listeners:       listeners,
-				Config:          kafkaConfig,
-				Storage:         storage,
-				Resources:       resources,
-			},
-			EntityOperator: &kafkav1beta2.KafkaSpecEntityOperator{
-				TopicOperator: &kafkav1beta2.KafkaSpecEntityOperatorTopicOperator{},
-				UserOperator:  &kafkav1beta2.KafkaSpecEntityOperatorUserOperator{},
-			},
+		"entityOperator": map[string]interface{}{
+			"topicOperator": map[string]interface{}{},
+			"userOperator":  map[string]interface{}{},
 		},
 	}
 
 	return kafka, nil
 }
 
+// buildNodePool constructs an unstructured Strimzi KafkaNodePool CR.
+//
+// A single dual-role (controller+broker) pool backs the cluster in KRaft mode.
+// The pool is bound to its Kafka cluster by the "strimzi.io/cluster" label,
+// whose value must equal the Kafka CR name.
+//
+// Resulting CR (kafka.strimzi.io/v1):
+//
+//	metadata:
+//	  labels:
+//	    strimzi.io/cluster: <instance>
+//	spec:
+//	  replicas: <n>
+//	  roles: [controller, broker]
+//	  storage:
+//	    type: jbod
+//	    volumes: [{ id: 0, type: persistent-claim, size: <qty>, ... }]
+//	  resources:
+//	    requests/limits: { cpu, memory }
+func buildNodePool(c *controller.Context, replicas int) (*unstructured.Unstructured, error) {
+	engine := c.Instance().Spec.Components[common.ComponentEngine]
+	cpu, memory := resolveResources(engine)
+	storageSize, storageClass := resolveStorage(engine)
+
+	volume := map[string]interface{}{
+		"id":          int64(0),
+		"type":        "persistent-claim",
+		"size":        storageSize.String(),
+		"deleteClaim": false,
+	}
+	if storageClass != nil && *storageClass != "" {
+		volume["class"] = *storageClass
+	}
+
+	resources := map[string]interface{}{
+		"requests": map[string]interface{}{"cpu": cpu.String(), "memory": memory.String()},
+		"limits":   map[string]interface{}{"cpu": cpu.String(), "memory": memory.String()},
+	}
+
+	pool := newNodePoolObj(c.Name(), c.Namespace())
+	pool.SetLabels(map[string]string{
+		common.ClusterLabel: c.Name(),
+	})
+	pool.Object["spec"] = map[string]interface{}{
+		"replicas": int64(replicas),
+		"roles":    []interface{}{"controller", "broker"},
+		"storage": map[string]interface{}{
+			"type":    "jbod",
+			"volumes": []interface{}{volume},
+		},
+		"resources": resources,
+	}
+
+	return pool, nil
+}
+
 // buildKafkaConfig returns Kafka broker config scaled to the replica count.
 // Replication factors are capped at 3 even if more brokers are requested.
-func buildKafkaConfig(replicas int) *apiextensionsv1.JSON {
+func buildKafkaConfig(replicas int) map[string]interface{} {
 	rf := replicas
 	if rf > 3 {
 		rf = 3
@@ -269,31 +352,31 @@ func buildKafkaConfig(replicas int) *apiextensionsv1.JSON {
 		minISR = 1
 	}
 
-	cfg := map[string]string{
-		"offsets.topic.replication.factor":         fmt.Sprintf("%d", rf),
-		"transaction.state.log.replication.factor": fmt.Sprintf("%d", rf),
-		"transaction.state.log.min.isr":            fmt.Sprintf("%d", minISR),
-		"default.replication.factor":               fmt.Sprintf("%d", rf),
-		"min.insync.replicas":                      fmt.Sprintf("%d", minISR),
+	return map[string]interface{}{
+		"offsets.topic.replication.factor":         int64(rf),
+		"transaction.state.log.replication.factor": int64(rf),
+		"transaction.state.log.min.isr":            int64(minISR),
+		"default.replication.factor":               int64(rf),
+		"min.insync.replicas":                      int64(minISR),
 	}
-
-	raw, _ := json.Marshal(cfg)
-	return &apiextensionsv1.JSON{Raw: raw}
 }
 
-// buildResourcesJSON serialises CPU/memory into the freeform JSON format
-// that Strimzi's KafkaSpecKafkaResources expects.
-func buildResourcesJSON(cpu, memory resource.Quantity) *kafkav1beta2.KafkaSpecKafkaResources {
-	cpuStr := cpu.String()
-	memStr := memory.String()
+// newKafkaObj creates an empty unstructured Kafka CR with the correct GVK.
+func newKafkaObj(name, namespace string) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(kafkaGVK)
+	u.SetName(name)
+	u.SetNamespace(namespace)
+	return u
+}
 
-	reqRaw, _ := json.Marshal(map[string]string{"cpu": cpuStr, "memory": memStr})
-	limRaw, _ := json.Marshal(map[string]string{"cpu": cpuStr, "memory": memStr})
-
-	return &kafkav1beta2.KafkaSpecKafkaResources{
-		Requests: &apiextensionsv1.JSON{Raw: reqRaw},
-		Limits:   &apiextensionsv1.JSON{Raw: limRaw},
-	}
+// newNodePoolObj creates an empty unstructured KafkaNodePool CR with the correct GVK.
+func newNodePoolObj(name, namespace string) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(nodePoolGVK)
+	u.SetName(name)
+	u.SetNamespace(namespace)
+	return u
 }
 
 // =============================================================================
@@ -302,20 +385,27 @@ func buildResourcesJSON(cpu, memory resource.Quantity) *kafkav1beta2.KafkaSpecKa
 
 // kafkaReadyCondition inspects the Kafka status conditions for the Ready condition.
 // Returns (true, "") when ready, or (false, message) when not.
-func kafkaReadyCondition(kafka *kafkav1beta2.Kafka) (bool, string) {
-	if kafka.Status == nil {
+func kafkaReadyCondition(kafka *unstructured.Unstructured) (bool, string) {
+	conditions, found, err := unstructured.NestedSlice(kafka.Object, "status", "conditions")
+	if err != nil || !found {
 		return false, "waiting for status"
 	}
-	for _, cond := range kafka.Status.Conditions {
-		if cond.Type == nil || *cond.Type != "Ready" {
+	for _, raw := range conditions {
+		cond, ok := raw.(map[string]interface{})
+		if !ok {
 			continue
 		}
-		if cond.Status != nil && *cond.Status == "True" {
+		condType, _, _ := unstructured.NestedString(cond, "type")
+		if condType != "Ready" {
+			continue
+		}
+		status, _, _ := unstructured.NestedString(cond, "status")
+		if status == "True" {
 			return true, ""
 		}
-		msg := ""
-		if cond.Message != nil {
-			msg = *cond.Message
+		msg, _, _ := unstructured.NestedString(cond, "message")
+		if msg == "" {
+			return false, "waiting for Ready condition"
 		}
 		return false, msg
 	}
@@ -323,16 +413,21 @@ func kafkaReadyCondition(kafka *kafkav1beta2.Kafka) (bool, string) {
 }
 
 // isKafkaFailed returns true if the Ready condition is False with an Error reason.
-func isKafkaFailed(kafka *kafkav1beta2.Kafka) bool {
-	if kafka.Status == nil {
+func isKafkaFailed(kafka *unstructured.Unstructured) bool {
+	conditions, found, err := unstructured.NestedSlice(kafka.Object, "status", "conditions")
+	if err != nil || !found {
 		return false
 	}
-	for _, cond := range kafka.Status.Conditions {
-		if cond.Type == nil || cond.Status == nil {
+	for _, raw := range conditions {
+		cond, ok := raw.(map[string]interface{})
+		if !ok {
 			continue
 		}
-		if *cond.Type == "Ready" && *cond.Status == "False" {
-			if cond.Reason != nil && strings.Contains(*cond.Reason, "Error") {
+		condType, _, _ := unstructured.NestedString(cond, "type")
+		status, _, _ := unstructured.NestedString(cond, "status")
+		if condType == "Ready" && status == "False" {
+			reason, _, _ := unstructured.NestedString(cond, "reason")
+			if strings.Contains(reason, "Error") {
 				return true
 			}
 		}
@@ -394,7 +489,7 @@ func resolveImage(c *controller.Context, engine corev1alpha1.ComponentSpec) (str
 }
 
 // extractKafkaVersion parses the Kafka version from a Strimzi image tag.
-// e.g. "quay.io/strimzi/kafka:0.44.0-kafka-3.9.0" → "3.9.0"
+// e.g. "quay.io/strimzi/kafka:1.0.0-kafka-4.2.0" → "4.2.0"
 func extractKafkaVersion(image string) string {
 	parts := strings.Split(image, "-kafka-")
 	if len(parts) == 2 {
@@ -404,7 +499,7 @@ func extractKafkaVersion(image string) string {
 	if idx := strings.LastIndex(image, ":"); idx >= 0 {
 		return image[idx+1:]
 	}
-	return "3.9.0"
+	return "4.2.0"
 }
 
 // resolveMetadataVersion derives the KRaft metadata version from the image tag.
